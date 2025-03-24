@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 
 inline bool is_power_of_two(uint64_t x) { return ~(x & (x - 1)); }
 
@@ -28,7 +29,7 @@ struct Arena {
         if (next_offset > m_capacity) { return nullptr; }
 
         m_offset = next_offset;
-        return (void*)aligned_addr;
+        return std::memset((void*)aligned_addr, 0, bytes);
     }
 
     void reset() { m_offset = 0; }
@@ -74,8 +75,21 @@ TEST test_arena() {
     TEST_ASSERT(arena.alloc_aligned(1, 1) != nullptr);
     TEST_ASSERT(arena.alloc_aligned(4, 4) == nullptr);
     arena.reset();
+
     TEST_ASSERT(arena.alloc_aligned(4, 1) != nullptr);
-    TEST_ASSERT(arena.alloc_aligned(4, 16) == nullptr);
+    TEST_ASSERT(arena.alloc_aligned(5, 8) == nullptr);
+    arena.reset();
+
+    TEST_ASSERT(arena.alloc_aligned(8, 8) != nullptr);
+    arena.reset();
+
+    TEST_ASSERT(arena.alloc_aligned(16, 16) == nullptr);
+    arena.reset();
+    
+    *(uint8_t*)arena.alloc_aligned(8, 8) = ~0; // fill with all 1s
+    arena.reset();
+    TEST_ASSERT(*(uint8_t*)(arena.alloc_aligned(8, 8)) == 0); // ensure mem zeroed
+    arena.reset();
 
     TEST_END
 }
