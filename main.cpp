@@ -6,6 +6,12 @@
 
 inline bool is_power_of_two(uint64_t x) { return ~(x & (x - 1)); }
 
+inline uintptr_t forward_align(uintptr_t base, size_t align) {
+    assert(is_power_of_two(align));
+    size_t padding = align - base & (align - 1);
+    return base + padding;
+}
+
 //============================== ARENA ==============================//
 struct Arena {
     void* m_memory;
@@ -16,12 +22,13 @@ struct Arena {
         if (bytes == 0) return nullptr;
 
         uintptr_t base_addr = (uintptr_t)m_memory + m_offset;
-        assert(is_power_of_two(align));
-        size_t padding = align - base_addr & (align - 1);
-        if (m_offset + bytes + padding > m_capacity) { return nullptr; }
+        uintptr_t aligned_addr = forward_align(base_addr, align);
+        size_t aligned_offset = aligned_addr - (uintptr_t)m_memory;
+        size_t next_offset = aligned_offset + bytes;
+        if (next_offset > m_capacity) { return nullptr; }
 
-        m_offset += bytes + padding;
-        return (void*)(base_addr + padding);
+        m_offset = next_offset;
+        return (void*)aligned_addr;
     }
 
     void reset() { m_offset = 0; }
