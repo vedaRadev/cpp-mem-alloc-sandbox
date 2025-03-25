@@ -1,2 +1,5 @@
 default:
-	g++ main.cpp -o main
+	mkdir -p build && g++ main.cpp -o ./build/main
+
+clean:
+	rm -rf build
