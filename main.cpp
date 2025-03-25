@@ -101,21 +101,32 @@ TEST test_arena() {
     Arena arena = { .m_memory = memory, .m_capacity = arena_size };
     void* alloc;
 
+    // Test general allocations
     TEST_ASSERT(arena.alloc_aligned(4, 4) != nullptr);
     TEST_ASSERT(arena.alloc_aligned(1, 1) != nullptr);
     TEST_ASSERT(arena.alloc_aligned(4, 4) == nullptr);
     arena.reset();
-
     TEST_ASSERT(arena.alloc_aligned(4, 1) != nullptr);
     TEST_ASSERT(arena.alloc_aligned(5, 8) == nullptr);
     arena.reset();
-
     TEST_ASSERT(arena.alloc_aligned(8, 8) != nullptr);
     arena.reset();
-
     TEST_ASSERT(arena.alloc_aligned(16, 16) == nullptr);
     arena.reset();
+
+    // Test that allocations are aligned properly.
+    arena.alloc_aligned(3, 2);
+    alloc = arena.alloc_aligned(4, 4);
+    TEST_ASSERT(is_power_of_two((uint64_t)alloc));
+    TEST_ASSERT((uintptr_t)alloc % 4 == 0);
+    arena.reset();
+    arena.alloc_aligned(4, 2);
+    alloc = arena.alloc_aligned(4, 4);
+    TEST_ASSERT(is_power_of_two((uint64_t)alloc));
+    TEST_ASSERT((uintptr_t)alloc % 4 == 0);
+    arena.reset();
     
+    // Test that mem is zeroed
     *(uint8_t*)arena.alloc_aligned(8, 8) = ~0; // fill with all 1s
     arena.reset();
     TEST_ASSERT(*(uint8_t*)(arena.alloc_aligned(8, 8)) == 0); // ensure mem zeroed
@@ -123,14 +134,12 @@ TEST test_arena() {
 
     // Test resize of last allocation
     alloc = arena.alloc_aligned(4, 4);
-    TEST_ASSERT(alloc != nullptr);
     TEST_ASSERT(arena.resize_aligned(alloc, 4, 8, 4) != nullptr);
     TEST_ASSERT(arena.alloc_aligned(4, 4) == nullptr);
     arena.reset();
 
     // Test resize of second-to-last allocation but resize is too big
     alloc = arena.alloc_aligned(4, 4);
-    TEST_ASSERT(alloc != nullptr);
     TEST_ASSERT(arena.alloc_aligned(4, 4) != nullptr);
     // Should force new allocation but we're out of space
     TEST_ASSERT(arena.resize_aligned(alloc, 4, 8, 4) == nullptr);
@@ -138,7 +147,6 @@ TEST test_arena() {
 
     // Test resize of second-to-last allocation
     alloc = arena.alloc_aligned(2, 2);
-    TEST_ASSERT(alloc != nullptr);
     TEST_ASSERT(arena.alloc_aligned(2, 2) != nullptr);
     TEST_ASSERT(arena.resize_aligned(alloc, 2, 4, 2) != nullptr);
     arena.reset();
