@@ -7,13 +7,15 @@
 
 inline bool is_power_of_two(uint64_t x) { return ~(x & (x - 1)); }
 
+//============================== ARENA ==============================//
+
+// Get the next address >= the `base` address aligned to `align` boundary.
 inline uintptr_t forward_align(uintptr_t base, size_t align) {
     assert(is_power_of_two(align));
     size_t padding = align - base & (align - 1);
     return base + padding;
 }
 
-//============================== ARENA ==============================//
 struct Arena {
     unsigned char* m_memory;
     size_t m_prev_offset;
@@ -62,6 +64,53 @@ struct Arena {
 
     void reset() { m_offset = 0; }
 };
+
+//============================== STACK ==============================//
+
+// This stack implementation only encodes padding.
+// The padding is the # bytes we need to put before the header such that a new
+// allocation can be properly aligned.
+// NOTE: Storing the padding as a byte limits the max alignment that can be used
+// with this particular stack allocator to 128 bytes.
+// Max alignment bytes = 2^(8 * sizeof(padding) - 1)
+struct StackAllocationHeader {
+    uint8_t padding;
+};
+
+// Calculate the amount of padding we need to both
+// A) align our pointer to an `align` byte boundary, and
+// B) fit a header of size `header_size` bytes in the padding.
+size_t calc_padding_with_header(uintptr_t base, size_t align, size_t header_size) {
+    assert(is_power_of_two(align));
+    size_t padding = align - base & (align - 1);
+
+    // If we can't fit our header into the padding we need to bump our
+    // padding up to the next aligned boundary that _can_ fit our header.
+    if (header_size > padding) {
+        size_t space_needed = header_size - padding;
+        // Is the additional space we need to store our header a multiple
+        // of our desired alignment?
+        if ((space_needed & (align - 1)) != 0) {
+            padding += align * (1 + space_needed / align);
+        } else {
+            padding += space_needed;
+        }
+    }
+
+    return padding;
+}
+
+struct Stack {
+    unsigned char* m_memory;
+    size_t m_capacity;
+    size_t m_offset;
+
+    // Try to allocate some amount of memory with the given alignment.
+    void* alloc_aligned(size_t size, size_t align) {
+        return nullptr;
+    }
+};
+
 ///////////////////////////////////////////////////////////////////////
 //============================== TESTS ==============================//
 ///////////////////////////////////////////////////////////////////////
@@ -164,11 +213,29 @@ TEST test_arena() {
     TEST_END
 }
 
+TEST test_calc_padding_with_header() {
+    TEST_ASSERT(calc_padding_with_header(0, 8, 1) == 8);
+    TEST_ASSERT(calc_padding_with_header(0, 8, 7) == 8);
+    TEST_ASSERT(calc_padding_with_header(1, 8, 1) == 7);
+    TEST_ASSERT(calc_padding_with_header(15, 8, 0) == 1);
+    TEST_ASSERT(calc_padding_with_header(1, 8, 14) == 15);
+
+    TEST_END
+}
+
+TEST test_stack() {
+    printf("TODO ");
+
+    TEST_END
+}
+
 ///////////////////////////////////////////////////////////////////////////
 //============================== END TESTS ==============================//
 ///////////////////////////////////////////////////////////////////////////
 int main() {
     RUN_TEST("forward align", test_forward_align);
     RUN_TEST("arena", test_arena);
+    RUN_TEST("calc padding with header", test_calc_padding_with_header);
+    RUN_TEST("stack", test_stack);
     return 0;
 }
