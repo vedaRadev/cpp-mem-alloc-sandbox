@@ -68,8 +68,9 @@ struct TestResult {
 #define TEST_END return { .passed = true };
 
 TEST test_arena() {
-    const size_t arena_size = 8;
-    Arena arena = { .m_memory = malloc(arena_size), .m_capacity = arena_size };
+    size_t arena_size = 8;
+    char memory[arena_size];
+    Arena arena = { .m_memory = &memory, .m_capacity = arena_size };
 
     TEST_ASSERT(arena.alloc_aligned(4, 4) != nullptr);
     TEST_ASSERT(arena.alloc_aligned(1, 1) != nullptr);
