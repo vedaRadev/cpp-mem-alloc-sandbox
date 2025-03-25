@@ -95,6 +95,16 @@ struct TestResult {
 
 #define TEST_END return { .passed = true };
 
+TEST test_forward_align() {
+    TEST_ASSERT(forward_align(3, 1) == 3);
+    TEST_ASSERT(forward_align(1, 4) == 4);
+    TEST_ASSERT(forward_align(29, 8) == 32);
+    TEST_ASSERT(forward_align(17, 16) == 32);
+    TEST_ASSERT(forward_align(129, 256) == 256);
+    
+    TEST_END
+}
+
 TEST test_arena() {
     size_t arena_size = 8;
     unsigned char memory[arena_size];
@@ -158,6 +168,7 @@ TEST test_arena() {
 //============================== END TESTS ==============================//
 ///////////////////////////////////////////////////////////////////////////
 int main() {
+    RUN_TEST("forward align", test_forward_align);
     RUN_TEST("arena", test_arena);
     return 0;
 }
