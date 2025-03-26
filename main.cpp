@@ -246,6 +246,66 @@ struct Stack {
     }
 };
 
+//============================== POOL ==============================//
+
+struct PoolFreeNode {
+    PoolFreeNode *next;
+};
+
+struct Pool {
+    unsigned char *m_memory;
+    size_t m_capacity;
+    size_t m_chunk_size;
+    PoolFreeNode *m_free_list_head;
+
+    Pool(bool &valid, void *memory, size_t capacity, size_t chunk_size, size_t chunk_align)
+        :   m_memory((unsigned char *)memory),
+            m_capacity(capacity),
+            m_chunk_size(chunk_size),
+            m_free_list_head(nullptr)
+    {
+        // chunks need to start at the right alignment
+        uintptr_t start = forward_align((uintptr_t)m_memory, chunk_align);
+        m_capacity -= start - (uintptr_t)m_memory;
+        // chunk size should be a multiple of chunk alignment
+        m_chunk_size = forward_align(m_chunk_size, chunk_align);
+
+        // We need to be able to store metadata for free nodes in free chunks.
+        // Obviously we need to enough capacity to store at least one chunk.
+        if (chunk_size < sizeof(PoolFreeNode) || m_capacity < m_chunk_size) {
+            valid = false;
+            return;
+        }
+
+        this->free_all();
+        valid = true;
+    }
+
+    void free_all() {
+        size_t num_chunks = m_capacity / m_chunk_size;
+        for (size_t i = 0; i < num_chunks; i++) {
+            void *chunk = &m_memory[i * m_chunk_size];
+            PoolFreeNode *node = (PoolFreeNode *)chunk;
+            node->next = m_free_list_head;
+            m_free_list_head = node;
+        }
+    }
+
+    bool free(void *ptr) {
+        if (ptr == nullptr) { return false; }
+
+        uintptr_t chunk = (uintptr_t)chunk;
+        uintptr_t start = (uintptr_t)m_memory;
+        uintptr_t end = start + m_capacity;
+        if (chunk < start || chunk > end) { return false; }
+
+        PoolFreeNode *node = (PoolFreeNode *)chunk;
+        node->next = m_free_list_head;
+        m_free_list_head = node;
+        return true;
+    }
+};
+
 ///////////////////////////////////////////////////////////////////////
 //============================== TESTS ==============================//
 ///////////////////////////////////////////////////////////////////////
@@ -421,6 +481,15 @@ TEST test_stack() {
     TEST_END
 }
 
+TEST test_pool() {
+    unsigned char buf[256];
+    bool pool_is_valid;
+    Pool pool(pool_is_valid, buf, 256, 64, 32);
+    TEST_ASSERT(pool_is_valid);
+
+    TEST_END
+}
+
 ///////////////////////////////////////////////////////////////////////////
 //============================== END TESTS ==============================//
 ///////////////////////////////////////////////////////////////////////////
@@ -429,5 +498,6 @@ int main() {
     RUN_TEST("arena", test_arena);
     RUN_TEST("calc padding with header", test_calc_padding_with_header);
     RUN_TEST("stack", test_stack);
+    RUN_TEST("pool", test_pool);
     return 0;
 }
