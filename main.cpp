@@ -81,6 +81,8 @@ struct Arena {
 //          Previous Offset                    Current Offset
 
 // Headers placed within the padding used to align data in our stack.
+// I get the feeling that making the headers essentially a doubly-linked list
+// might not have been the right way to go about things...
 struct StackAllocationHeader {
     // Num bytes we need to put before the header such that a new allocation can
     // be properly aligned.
@@ -165,24 +167,22 @@ struct Stack {
         if (curr_addr >= start + m_offset) { return false; }
 
         StackAllocationHeader* header = (StackAllocationHeader*)(curr_addr - sizeof(StackAllocationHeader));
-        // size_t prev_offset = (size_t)(curr_addr - (uintptr_t)header->padding - start);
         // Protect against out-of-order frees
         if (m_prev_offset != header->prev_offset) { return false; }
 
         m_offset = m_prev_offset;
         if (header->prev_header != nullptr) {
             m_prev_offset = header->prev_header->prev_offset;
+            m_prev_header = header->prev_header;
         } else {
             m_prev_offset = 0;
+            m_prev_header = nullptr;
         }
 
         return true;
     }
 
-    // TODO update to work with new header
-    // TODO enforce LIFO?
     // NOTE: This does NOT support changing the _alignment_ of an allocation.
-    /*
     void* resize_aligned(void* old_allocation, size_t old_size, size_t new_size, size_t align) {
         if (old_allocation == nullptr) { return this->alloc_aligned(new_size, align); }
         if (new_size == 0) {
@@ -197,23 +197,53 @@ struct Stack {
         if (old_alloc >= start + m_offset) { return nullptr; }
 
         StackAllocationHeader* header = (StackAllocationHeader*)(old_alloc - sizeof(StackAllocationHeader));
+
         // Was this the most recent thing we allocated?
-        if (header->prev_offset == m_prev_offset) {
+        if (header == m_prev_header) {
             if (new_size > old_size) {
                 std::memset((void*)(old_alloc + old_size), 0, new_size);
             }
             m_offset = (old_alloc - start) + new_size;
             return old_allocation;
-        } else {
-            void* resized_alloc = this->alloc_aligned(new_size, align);
-            size_t min_size = old_size < new_size ? old_size : new_size;
-            std::memmove(resized_alloc, old_allocation, min_size);
-            return resized_alloc;
         }
-    }
-    */
 
-    void reset() { m_offset = 0; }
+        // Is the user trying to resize a non-top block of memory that was
+        // already resized (see below note)?
+        if (header->prev_header == nullptr && header->next_header == nullptr) {
+            return nullptr;
+        }
+
+        uintptr_t resized_alloc = (uintptr_t)this->alloc_aligned(new_size, align);
+        size_t min_size = old_size < new_size ? old_size : new_size;
+        std::memmove((void*)resized_alloc, old_allocation, min_size);
+
+        // Treat this block of memory as if it doesn't exist such that when
+        // the user attempts to free the _next_ block, we free to the
+        // previous offset before _this_ block. This allows the user to
+        // discard the old pointer they were using if they attempted to
+        // resize a non-top allocation.
+        // In short, we're basically making this block of memory invisible
+        // to our stack allocator and treating the next block of memory as
+        // if it just has a lot more padding than usual.
+        //
+        // TODO Actually is this good? Maybe this is confusing from a user
+        // perspective. Now the user has to ensure that they _don't_ use
+        // the old allocation again. Need to think on this.
+        header->next_header->padding += header->padding;
+        header->next_header->prev_offset = header->prev_offset;
+        header->next_header->prev_header = header->prev_header;
+        header->prev_header->next_header = header->next_header;
+        header->prev_header = nullptr;
+        header->next_header = nullptr;
+
+        return (void*)resized_alloc;
+    }
+
+    void reset() {
+        m_offset = 0;
+        m_prev_offset = 0;
+        m_prev_header = nullptr;
+    }
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -333,20 +363,59 @@ TEST test_stack() {
     size_t stack_size = 256;
     unsigned char buf[stack_size];
     Stack stack = { .m_memory = buf, .m_capacity = stack_size };
-    void *curr_alloc, *prev_alloc;
+    void *alloc_a, *alloc_b, *alloc_c, *alloc_d;
 
-    // Test in-order free succeeds
-    prev_alloc = stack.alloc_aligned(16, 16);
-    curr_alloc = stack.alloc_aligned(32, 32);
-    TEST_ASSERT(stack.free(curr_alloc));
-    TEST_ASSERT(stack.free(prev_alloc));
+    // Test: single alloc works and is aligned
+    alloc_a = stack.alloc_aligned(8, 8);
+    TEST_ASSERT(alloc_a != nullptr);
+    TEST_ASSERT(((uintptr_t)alloc_a & 7) == 0);
+    TEST_ASSERT(stack.m_prev_header != nullptr);
+    // Header should come right before the allocation with no padding between the two.
+    TEST_ASSERT((uintptr_t)stack.m_prev_header + sizeof(StackAllocationHeader) == (uintptr_t)alloc_a);
+
+    // Test: reset works
+    stack.reset();
+    TEST_ASSERT(stack.m_offset == 0);
+    TEST_ASSERT(stack.m_prev_offset == 0);
+    TEST_ASSERT(stack.m_prev_header == 0);
+
+    // Test: in-order free succeeds
+    alloc_a = stack.alloc_aligned(16, 16);
+    alloc_b = stack.alloc_aligned(32, 32);
+    TEST_ASSERT(stack.free(alloc_b));
+    TEST_ASSERT(stack.free(alloc_a));
     TEST_ASSERT(stack.m_prev_offset == 0);
     stack.reset();
 
-    // Test out-of-order free fails
-    curr_alloc = stack.alloc_aligned(32, 8);
+    // Test: out-of-order free fails
+    alloc_a = stack.alloc_aligned(32, 8);
     stack.alloc_aligned(32, 8);
-    TEST_ASSERT(!stack.free(curr_alloc));
+    TEST_ASSERT(!stack.free(alloc_a));
+    stack.reset();
+
+    // Test: resizing a top alloc
+    alloc_a = stack.alloc_aligned(8, 8);
+    size_t offset_before_resize = stack.m_offset;
+    std::memcpy(alloc_a, "hello67", 8); // alloc_a = hello67\0
+    alloc_b = stack.resize_aligned(alloc_a, 8, 16, 8);
+    TEST_ASSERT(alloc_a == alloc_b);
+    // mem shouldn't be changed, just resized
+    TEST_ASSERT(std::strcmp((const char*)alloc_a, "hello67") == 0);
+    TEST_ASSERT(stack.m_offset != offset_before_resize);
+    stack.reset();
+
+    // Test: resizing a non-top alloc
+    alloc_a = stack.alloc_aligned(8, 8);
+    alloc_b = stack.alloc_aligned(8, 8);
+    alloc_c = stack.alloc_aligned(8, 8);
+    alloc_d = stack.resize_aligned(alloc_b, 8, 16, 8);
+    TEST_ASSERT(stack.resize_aligned(alloc_b, 8, 16, 8) == nullptr);
+    TEST_ASSERT(alloc_d != nullptr);
+    TEST_ASSERT(alloc_d != alloc_b);
+    stack.free(alloc_d);
+    stack.free(alloc_c);
+    TEST_ASSERT(!stack.free(alloc_b));
+    TEST_ASSERT(stack.free(alloc_a));
     stack.reset();
 
     TEST_END
