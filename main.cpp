@@ -38,6 +38,7 @@ struct Arena {
     }
 
     // Given an older allocation from the arena, attempt to resize it.
+    // NOTE: This does NOT support changing the _alignment_ of an allocation.
     void* resize_aligned(void* old_allocation, size_t old_size, size_t new_size, size_t align) {
         assert(is_power_of_two(align));
         unsigned char* old_alloc = (unsigned char*)old_allocation;
@@ -67,15 +68,30 @@ struct Arena {
 
 //============================== STACK ==============================//
 
-// This stack implementation only encodes padding.
-// The padding is the # bytes we need to put before the header such that a new
-// allocation can be properly aligned.
-// NOTE: Storing the padding as a byte limits the max alignment that can be used
-// with this particular stack allocator to 128 bytes.
-// Max alignment bytes = 2^(8 * sizeof(padding) - 1)
+// This is what our stack memory block looks like.
+// We ensure that there's enough padding between allocations to do two things:
+// 1) Properly align the next allocation to a user-supplied alignment (power of two).
+// 2) Store a header within the padding between allocations.
+// The header stores information that allows us to set our offset back to the start
+// of a previous allocation, in effect freeing memory of the most recent allocations.
+// +----------------+---------+------+----------------+------+
+// | Old Allocation | Padding |Header| New Allocation | Free |
+// +----------------+---------+------+----------------+------+
+//                  ↑                                 ↑
+//          Previous Offset                    Current Offset
+
+// Headers placed within the padding used to align data in our stack.
 struct StackAllocationHeader {
-    uint8_t padding;
+    // Num bytes we need to put before the header such that a new allocation can
+    // be properly aligned.
+    size_t padding;
+    size_t prev_offset;
+    StackAllocationHeader *prev_header;
+    StackAllocationHeader *next_header;
 };
+
+// Max alignment bytes = 2^(8 * sizeof(padding) - 1)
+constexpr size_t STACK_MAX_ALIGN = (size_t)1 << (8 * sizeof(StackAllocationHeader::padding) - 1);
 
 // Calculate the amount of padding we need to both
 // A) align our pointer to an `align` byte boundary, and
@@ -104,11 +120,100 @@ struct Stack {
     unsigned char* m_memory;
     size_t m_capacity;
     size_t m_offset;
+    size_t m_prev_offset;
+    StackAllocationHeader *m_prev_header;
 
     // Try to allocate some amount of memory with the given alignment.
-    void* alloc_aligned(size_t size, size_t align) {
-        return nullptr;
+    void* alloc_aligned(size_t alloc_size, size_t align) {
+        assert(is_power_of_two(align));
+        // Max align bytes = 2^(8 * sizeof(padding) - 1)
+        // For one byte:
+        if (align > STACK_MAX_ALIGN) { align = STACK_MAX_ALIGN; }
+        uintptr_t base_addr = (uintptr_t)m_memory + m_offset;
+        size_t padding = calc_padding_with_header(base_addr, align, sizeof(StackAllocationHeader));
+        // Check if we're out of memory
+        if (m_offset + alloc_size + padding > m_capacity) { return nullptr; }
+        m_prev_offset = m_offset;
+        m_offset += padding;
+
+        uintptr_t next_aligned_addr = base_addr + padding;
+        StackAllocationHeader* header = (StackAllocationHeader*)(next_aligned_addr - sizeof(StackAllocationHeader));
+        header->padding = (uint8_t)padding;
+        header->prev_header = m_prev_header;
+        header->prev_offset = m_prev_offset;
+        if (m_prev_header != nullptr) {
+            m_prev_header->next_header = header;
+        }
+        m_prev_header = header;
+        m_offset += alloc_size;
+
+        return std::memset((void*)next_aligned_addr, 0, alloc_size);
     }
+
+    // Given an allocation, free to the start of the previous allocation.
+    // Returns whether the operation was successful.
+    bool free(void* alloc) {
+        if (alloc == nullptr) return false;
+
+        uintptr_t start = (uintptr_t)m_memory;
+        uintptr_t end = start + m_capacity;
+        uintptr_t curr_addr = (uintptr_t)alloc;
+        // Ensure that we're in the bounds of our memory.
+        // Should probably assert here.
+        if (curr_addr < start || curr_addr > end) { return false; }
+        // Allow double-frees
+        if (curr_addr >= start + m_offset) { return false; }
+
+        StackAllocationHeader* header = (StackAllocationHeader*)(curr_addr - sizeof(StackAllocationHeader));
+        // size_t prev_offset = (size_t)(curr_addr - (uintptr_t)header->padding - start);
+        // Protect against out-of-order frees
+        if (m_prev_offset != header->prev_offset) { return false; }
+
+        m_offset = m_prev_offset;
+        if (header->prev_header != nullptr) {
+            m_prev_offset = header->prev_header->prev_offset;
+        } else {
+            m_prev_offset = 0;
+        }
+
+        return true;
+    }
+
+    // TODO update to work with new header
+    // TODO enforce LIFO?
+    // NOTE: This does NOT support changing the _alignment_ of an allocation.
+    /*
+    void* resize_aligned(void* old_allocation, size_t old_size, size_t new_size, size_t align) {
+        if (old_allocation == nullptr) { return this->alloc_aligned(new_size, align); }
+        if (new_size == 0) {
+            this->free(old_allocation);
+            return nullptr;
+        }
+
+        uintptr_t old_alloc = (uintptr_t)old_allocation;
+        uintptr_t start = (uintptr_t)m_memory;
+        uintptr_t end = start + m_capacity;
+        if (old_alloc < start || old_alloc > end) { return nullptr; }
+        if (old_alloc >= start + m_offset) { return nullptr; }
+
+        StackAllocationHeader* header = (StackAllocationHeader*)(old_alloc - sizeof(StackAllocationHeader));
+        // Was this the most recent thing we allocated?
+        if (header->prev_offset == m_prev_offset) {
+            if (new_size > old_size) {
+                std::memset((void*)(old_alloc + old_size), 0, new_size);
+            }
+            m_offset = (old_alloc - start) + new_size;
+            return old_allocation;
+        } else {
+            void* resized_alloc = this->alloc_aligned(new_size, align);
+            size_t min_size = old_size < new_size ? old_size : new_size;
+            std::memmove(resized_alloc, old_allocation, min_size);
+            return resized_alloc;
+        }
+    }
+    */
+
+    void reset() { m_offset = 0; }
 };
 
 ///////////////////////////////////////////////////////////////////////
@@ -219,12 +324,30 @@ TEST test_calc_padding_with_header() {
     TEST_ASSERT(calc_padding_with_header(1, 8, 1) == 7);
     TEST_ASSERT(calc_padding_with_header(15, 8, 0) == 1);
     TEST_ASSERT(calc_padding_with_header(1, 8, 14) == 15);
+    TEST_ASSERT(calc_padding_with_header(1, 8, 32) == 39);
 
     TEST_END
 }
 
 TEST test_stack() {
-    printf("TODO ");
+    size_t stack_size = 256;
+    unsigned char buf[stack_size];
+    Stack stack = { .m_memory = buf, .m_capacity = stack_size };
+    void *curr_alloc, *prev_alloc;
+
+    // Test in-order free succeeds
+    prev_alloc = stack.alloc_aligned(16, 16);
+    curr_alloc = stack.alloc_aligned(32, 32);
+    TEST_ASSERT(stack.free(curr_alloc));
+    TEST_ASSERT(stack.free(prev_alloc));
+    TEST_ASSERT(stack.m_prev_offset == 0);
+    stack.reset();
+
+    // Test out-of-order free fails
+    curr_alloc = stack.alloc_aligned(32, 8);
+    stack.alloc_aligned(32, 8);
+    TEST_ASSERT(!stack.free(curr_alloc));
+    stack.reset();
 
     TEST_END
 }
