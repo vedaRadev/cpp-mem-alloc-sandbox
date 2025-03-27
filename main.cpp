@@ -7,14 +7,14 @@
 
 inline bool is_power_of_two(uint64_t x) { return ~(x & (x - 1)); }
 
-//============================== ARENA ==============================//
-
 // Get the next address >= the `base` address aligned to `align` boundary.
 inline uintptr_t forward_align(uintptr_t base, size_t align) {
     assert(is_power_of_two(align));
     size_t padding = align - base & (align - 1);
     return base + padding;
 }
+
+//============================== ARENA ==============================//
 
 struct Arena {
     unsigned char* m_memory;
@@ -254,9 +254,10 @@ struct PoolFreeNode {
 
 struct Pool {
     unsigned char *m_memory;
+    unsigned char *m_aligned_memory;
+    PoolFreeNode *m_free_list_head;
     size_t m_capacity;
     size_t m_chunk_size;
-    PoolFreeNode *m_free_list_head;
 
     Pool(bool &valid, void *memory, size_t capacity, size_t chunk_size, size_t chunk_align)
         :   m_memory((unsigned char *)memory),
@@ -265,8 +266,8 @@ struct Pool {
             m_free_list_head(nullptr)
     {
         // chunks need to start at the right alignment
-        uintptr_t start = forward_align((uintptr_t)m_memory, chunk_align);
-        m_capacity -= start - (uintptr_t)m_memory;
+        m_aligned_memory = (unsigned char *)forward_align((uintptr_t)m_memory, chunk_align);
+        m_capacity -= m_aligned_memory - m_memory;
         // chunk size should be a multiple of chunk alignment
         m_chunk_size = forward_align(m_chunk_size, chunk_align);
 
@@ -284,7 +285,7 @@ struct Pool {
     void free_all() {
         size_t num_chunks = m_capacity / m_chunk_size;
         for (size_t i = 0; i < num_chunks; i++) {
-            void *chunk = &m_memory[i * m_chunk_size];
+            void *chunk = &m_aligned_memory[i * m_chunk_size];
             PoolFreeNode *node = (PoolFreeNode *)chunk;
             node->next = m_free_list_head;
             m_free_list_head = node;
@@ -294,8 +295,8 @@ struct Pool {
     bool free(void *ptr) {
         if (ptr == nullptr) { return false; }
 
-        uintptr_t chunk = (uintptr_t)chunk;
-        uintptr_t start = (uintptr_t)m_memory;
+        uintptr_t chunk = (uintptr_t)ptr;
+        uintptr_t start = (uintptr_t)m_aligned_memory;
         uintptr_t end = start + m_capacity;
         if (chunk < start || chunk > end) { return false; }
 
@@ -303,6 +304,14 @@ struct Pool {
         node->next = m_free_list_head;
         m_free_list_head = node;
         return true;
+    }
+
+    void* alloc() {
+        PoolFreeNode *node = m_free_list_head;
+        if (node == nullptr) { return nullptr; }
+        // pop from free list
+        m_free_list_head = m_free_list_head->next;
+        return memset(node, 0, m_chunk_size);
     }
 };
 
@@ -481,11 +490,59 @@ TEST test_stack() {
     TEST_END
 }
 
+int get_num_free_pool_chunks(Pool &pool) {
+    int num_free = 0;
+    for (PoolFreeNode *curr = pool.m_free_list_head; curr != nullptr; curr = curr->next) {
+        num_free++;
+    }
+    return num_free;
+}
+
 TEST test_pool() {
-    unsigned char buf[256];
+    // 320 should give us enough room to (hopefully) always get 4 64-byte chunks
+    // regardless of the address of the start of the backing buffer.
+    unsigned char buf[320];
     bool pool_is_valid;
-    Pool pool(pool_is_valid, buf, 256, 64, 32);
+    // 64-byte chunks at a 64-byte alignment
+    Pool pool(pool_is_valid, buf, 320, 64, 64);
     TEST_ASSERT(pool_is_valid);
+    // Just in case we _don't_ get 4 chunks due to alignment.
+    size_t num_chunks = pool.m_capacity / pool.m_chunk_size;
+
+    // Test: all chunks are in free list upon initialization
+    TEST_ASSERT(get_num_free_pool_chunks(pool) == num_chunks);
+
+    // Test: single alloc succeeds, removes chunk from free list
+    unsigned char *chunk = (unsigned char*)pool.alloc();
+    TEST_ASSERT(chunk != nullptr);
+    TEST_ASSERT(get_num_free_pool_chunks(pool) == num_chunks - 1);
+
+    // Test: allocated chunk is within range of the pool's memory
+    TEST_ASSERT(chunk >= pool.m_memory && chunk <= pool.m_memory + pool.m_capacity);
+
+    // Test: freeing the chunk adds it back to the free list
+    TEST_ASSERT(pool.free(chunk));
+    TEST_ASSERT(get_num_free_pool_chunks(pool) == num_chunks);
+
+    // Test: cannot alloc more chunks than are available
+    // Test: all chunks are aligned
+    for (int i = 0; i < num_chunks; i++) {
+        void *chunk = pool.alloc();
+        TEST_ASSERT(chunk != nullptr);
+        TEST_ASSERT(((uintptr_t)chunk & 63) == 0);
+    }
+    TEST_ASSERT(!pool.alloc());
+
+    // Test: free_all() adds all chunks back to free list
+    pool.free_all();
+    TEST_ASSERT(get_num_free_pool_chunks(pool) == num_chunks);
+
+    // Test: cannot free null ptr
+    TEST_ASSERT(!pool.free(nullptr));
+
+    // Test: cannot free outside of backing buffer
+    TEST_ASSERT(!pool.free(pool.m_memory - pool.m_chunk_size * 2));
+    TEST_ASSERT(!pool.free(pool.m_memory + pool.m_capacity + pool.m_chunk_size * 4));
 
     TEST_END
 }
@@ -493,6 +550,7 @@ TEST test_pool() {
 ///////////////////////////////////////////////////////////////////////////
 //============================== END TESTS ==============================//
 ///////////////////////////////////////////////////////////////////////////
+
 int main() {
     RUN_TEST("forward align", test_forward_align);
     RUN_TEST("arena", test_arena);
